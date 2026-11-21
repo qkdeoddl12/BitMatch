@@ -16,6 +16,14 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/qkdeoddl12/BitMatch/releases/latest"><img src="https://img.shields.io/github/v/release/qkdeoddl12/BitMatch?label=release&color=3ad29f" alt="최신 릴리스"></a>
+  <a href="https://github.com/qkdeoddl12/BitMatch/releases"><img src="https://img.shields.io/github/downloads/qkdeoddl12/BitMatch/total?color=3a9eff" alt="다운로드 수"></a>
+  <img src="https://img.shields.io/badge/macOS-14.2%2B-lightgrey" alt="macOS 14.2 이상">
+  <img src="https://img.shields.io/badge/Apple%20silicon-native-lightgrey" alt="Apple silicon">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/qkdeoddl12/BitMatch?color=lightgrey" alt="MIT 라이선스"></a>
+</p>
+
+<p align="center">
   <img src="docs/screenshot.png" width="760" alt="다크 모드에서 Apple Music을, 라이트 모드에서 Spotify를 따라가는 BitMatch">
 </p>
 
@@ -27,8 +35,10 @@ YouTube는 대부분 48 kHz입니다. 그런데 macOS는 출력 장치의 샘플
 있으면 44.1 kHz 앨범은 리샘플링되고, 44.1 kHz로 고정돼 있으면 96 kHz 고해상도 음원의 정보가
 잘려 나갑니다.
 
-BitMatch는 어떤 앱이 재생 중인지 알아내서 출력 장치를 그 앱에 맞는 포맷으로 바꿉니다.
-오디오 MIDI 설정을 다시 열 필요가 없습니다.
+BitMatch는 Mac용 자동 샘플레이트 전환 앱입니다. 어떤 앱이 재생 중인지 알아내서 출력 장치를
+그 앱에 맞는 포맷으로 바꿉니다. 오디오 MIDI 설정을 다시 열 필요가 없습니다.
+
+도움이 됐다면 스타를 눌러 주세요. 다른 사람들이 찾는 데 도움이 됩니다.
 
 ## 무엇을 맞추나요
 
@@ -124,6 +134,30 @@ BitMatch는 로그에서 이 줄만 지켜봅니다. 다른 앱은 이런 정보
 - **Music › 설정 › 재생:** 음량 자동 조절, 사운드 향상, 크로스페이드 끄기.
 - **Music › 윈도우 › 이퀄라이저:** 끄기.
 - **음량:** Music의 음량 슬라이더는 100%. 음량은 DAC나 앰프에서 조절하세요.
+
+## 자주 묻는 질문
+
+**BitMatch가 소리를 바꾸나요?**
+오디오 신호는 전혀 건드리지 않습니다. 출력 장치의 포맷만 바꿔서 macOS가 변환할 일이 없게
+만듭니다. 앱이 내보낸 소리가 그대로 나갑니다.
+
+**어딘가로 데이터를 보내나요?**
+아니요. 앱에 네트워크 코드가 없고, 분석 도구도 계정도 없습니다. 소스는 전부 여기 있습니다.
+
+**열 때 macOS가 왜 경고하나요?**
+공증에 필요한 Apple 개발자 계정이 유료인데, 이건 무료 프로젝트입니다. 받은 파일을 믿기
+어렵다면 소스에서 직접 빌드하세요. 명령 한 줄이면 됩니다.
+
+**특별한 권한이 필요한가요?**
+화면 기록, 손쉬운 사용, 마이크 권한은 필요 없습니다. 관리자 계정만 있으면 됩니다. macOS가
+시스템 로그를 읽는 데 관리자 계정을 요구하기 때문입니다.
+
+**전환될 때 소리가 끊기나요?**
+포맷이 실제로 바뀔 때만, DAC가 다시 동기화되는 아주 짧은 무음이 있습니다. 같은 포맷의 곡이
+이어지면 끊김 없이 재생됩니다.
+
+**디스플레이가 있는 외장 DAC를 씁니다. 표시도 따라 바뀌나요?**
+네. BitMatch는 장치의 물리 포맷을 바꾸고, DAC는 그 값을 표시합니다.
 
 ## 제한 사항
 

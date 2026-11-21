@@ -1,0 +1,45 @@
+name: Bug report
+description: Something isn't matching, switching, or showing up the way it should
+labels: [bug]
+body:
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "e.g. 27.2"
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Output device
+      description: The DAC, interface, or speakers you are playing through
+      placeholder: "e.g. iFi ZEN DAC 3 over USB"
+    validations:
+      required: true
+  - type: dropdown
+    id: app
+    attributes:
+      label: Which app was playing?
+      options:
+        - Apple Music
+        - Spotify
+        - A web browser
+        - Another app
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+      description: The Source and Output values from the BitMatch popover help a lot
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: BitMatch log (optional)
+      description: |
+        Run this in Terminal right after the problem happens and paste the output:
+        `log show --last 5m --predicate 'subsystem == "io.github.qkdeoddl12.BitMatch"' --style compact`
+      render: text

@@ -1,0 +1,14 @@
+name: Feature request
+description: An app BitMatch should follow, or something it should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like BitMatch to do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: What are you trying to listen to, and how is it going wrong today?

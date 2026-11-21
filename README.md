@@ -16,6 +16,14 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/qkdeoddl12/BitMatch/releases/latest"><img src="https://img.shields.io/github/v/release/qkdeoddl12/BitMatch?label=release&color=3ad29f" alt="Latest release"></a>
+  <a href="https://github.com/qkdeoddl12/BitMatch/releases"><img src="https://img.shields.io/github/downloads/qkdeoddl12/BitMatch/total?color=3a9eff" alt="Downloads"></a>
+  <img src="https://img.shields.io/badge/macOS-14.2%2B-lightgrey" alt="macOS 14.2 or later">
+  <img src="https://img.shields.io/badge/Apple%20silicon-native-lightgrey" alt="Apple silicon">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/qkdeoddl12/BitMatch?color=lightgrey" alt="MIT license"></a>
+</p>
+
+<p align="center">
   <img src="docs/screenshot.png" width="760" alt="BitMatch following Apple Music in dark mode and Spotify in light mode">
 </p>
 
@@ -27,8 +35,10 @@ rate the device happens to be set to in Audio MIDI Setup is what everything gets
 A 44.1 kHz album through a DAC sitting at 192 kHz is being resampled, and a 96 kHz Hi-Res track
 at 44.1 kHz is losing what you're paying for.
 
-BitMatch works out which app is playing and puts the output device in the right format for it.
-You never open Audio MIDI Setup again.
+BitMatch is an automatic sample rate switcher for the Mac. It works out which app is playing and
+puts the output device in the right format for it. You never open Audio MIDI Setup again.
+
+If it saves you the trip, a star helps other people find it.
 
 ## What gets matched
 
@@ -125,6 +135,30 @@ Matching the format is necessary but not sufficient. In Apple Music, also check:
 - **Music › Settings › Playback:** Sound Check, Sound Enhancer, and Crossfade off.
 - **Music › Window › Equalizer:** off.
 - **Volume:** Music's volume slider at 100%. Set the level on your DAC or amp.
+
+## FAQ
+
+**Does BitMatch change how my music sounds?**
+It never touches the audio. It only changes the format of the output device, so that macOS has
+nothing to convert. What you hear is what the app sent.
+
+**Does it send anything anywhere?**
+No. There is no networking code in the app, no analytics, and no account. The source is all here.
+
+**Why does macOS warn me when I open it?**
+Apple charges for the developer account that notarization needs, and this is a free project.
+If you'd rather not trust a download, build it from source: it takes one command.
+
+**Does it need special permissions?**
+No screen recording, no accessibility, no microphone. It needs an administrator account, because
+macOS requires one to read the system log.
+
+**Will I hear it switch?**
+Only when the format actually changes, as a brief silence while the DAC re-locks. Two tracks in
+the same format play straight through.
+
+**I use an external DAC with its own display. Will the display follow?**
+Yes. BitMatch sets the device's physical format, which is what the DAC reports.
 
 ## Limitations
 

@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Regenerates Resources/AppIcon.icns and docs/screenshot.png from the SwiftUI views.
+# Regenerates the icon, the README screenshot and the link preview card from the SwiftUI views.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -21,4 +21,6 @@ sips -z 256 256 "$WORK/icon.png" --out docs/icon.png >/dev/null
 
 # The README is in English, so render the screenshot in English too.
 "$BIN" -AppleLanguages "(en)" --render popover docs/screenshot.png
-echo "Wrote Resources/AppIcon.icns, docs/icon.png, docs/screenshot.png"
+# Upload this one by hand under the repository's Settings > Social preview.
+"$BIN" -AppleLanguages "(en)" --render social docs/social-preview.png
+echo "Wrote Resources/AppIcon.icns, docs/icon.png, docs/screenshot.png, docs/social-preview.png"
