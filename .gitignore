@@ -1,0 +1,6 @@
+.build/
+.swiftpm/
+dist/
+BitMatch.app/
+*.zip
+.DS_Store
