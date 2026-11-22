@@ -22,7 +22,7 @@ func formatRate(_ rate: Double) -> String {
 }
 
 /// The single source of truth for the version; build.sh reads it from here.
-let appVersion = "0.1.0"
+let appVersion = "0.2.0"
 
 enum Theme {
     static let brandTop = Color(red: 0.37, green: 0.95, blue: 0.76)

@@ -1,5 +1,55 @@
 import Foundation
 
+/// First capture group of `pattern` in `text`.
+private func capture(_ pattern: String, in text: String) -> String? {
+    guard let regex = try? NSRegularExpression(pattern: pattern),
+          let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+          let range = Range(match.range(at: 1), in: text)
+    else { return nil }
+    return String(text[range])
+}
+
+/// A Core Audio four-character codec code in the name people know it by.
+func codecDisplayName(_ code: String) -> String {
+    switch code.trimmingCharacters(in: .whitespaces).lowercased() {
+    case "qlac", "alac": return "ALAC"
+    case "qaac", "aac": return "AAC"
+    case "aach", "aacp": return "HE-AAC"
+    case "flac", "qflc": return "FLAC"
+    case "lpcm": return "PCM"
+    case ".mp3", "mp3": return "MP3"
+    case "opus": return "Opus"
+    case "ac-3": return "Dolby Digital"
+    case "ec-3": return "Dolby Digital Plus"
+    default: return code.trimmingCharacters(in: .whitespaces).uppercased()
+    }
+}
+
+/// What an app's media engine says it is about to play.
+///
+/// Any app that plays through macOS's own media stack (AVPlayer, Safari, the TV app) reports one,
+/// so this reaches far beyond Apple Music. It carries a sample rate but no bit depth.
+struct StreamFormat: Equatable {
+    var pid: pid_t
+    var codec: String       // four-character code: "aac ", "lpcm", "alac", ...
+    var sampleRate: Double
+
+    var codecName: String { codecDisplayName(codec) }
+
+    /// CoreMedia logs a line like this from the playing process whenever it opens an audio queue:
+    /// `Safari[123:4ab] [com.apple.coremedia:] ... Creating AudioQueue with format:'aac ',
+    ///  framesPerPacket:1024, sampleRate:44100, ...`
+    static func parse(_ line: String) -> StreamFormat? {
+        guard line.contains("Creating AudioQueue with format"),
+              let pidText = capture(#"\[(\d+):[0-9a-fA-F]+\] \[com\.apple\.coremedia"#, in: line),
+              let pid = pid_t(pidText),
+              let rateText = capture(#"sampleRate:(\d+)"#, in: line),
+              let rate = Double(rateText), rate >= 8000, rate <= 768_000
+        else { return nil }
+        return StreamFormat(pid: pid, codec: capture(#"format:'(.{4})'"#, in: line) ?? "?", sampleRate: rate)
+    }
+}
+
 /// The audio format the Music app is actually rendering right now.
 struct TrackFormat: Equatable {
     var codec: String       // "qlac" (ALAC), "qaac" (AAC), ...
@@ -15,13 +65,7 @@ struct TrackFormat: Equatable {
     }
 
     /// The codec Music is decoding, in the name people know it by.
-    var codecName: String {
-        switch codec {
-        case "qlac", "alac": return "ALAC"
-        case "qaac", "aac": return "AAC"
-        default: return codec.uppercased()
-        }
-    }
+    var codecName: String { codecDisplayName(codec) }
 
     /// Extracts the format from one line of the system log, or nil if the line is something else.
     ///
@@ -40,23 +84,17 @@ struct TrackFormat: Equatable {
             bitDepth: Int(capture(#"\[BitDepth (\d+)\]"#, in: line) ?? "") ?? 0
         )
     }
-
-    private static func capture(_ pattern: String, in text: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
-              let range = Range(match.range(at: 1), in: text)
-        else { return nil }
-        return String(text[range])
-    }
 }
 
-/// Follows the system log and reports the playback format every time Music logs one.
+/// Follows the system log and reports the playback format every time Music logs one, plus the
+/// stream format any other app's media engine announces.
 ///
 /// The log is read through `/usr/bin/log`, which can die or go quiet (after sleep, for instance).
 /// The watcher restarts it when it exits, and `resync()` catches the case where it is alive but stuck.
 final class LogWatcher: @unchecked Sendable {
-    private static let predicate =
-        #"process == "Music" AND subsystem == "com.apple.coremedia" AND eventMessage CONTAINS "fpfs_ReportAudioPlaybackThroughFigLog""#
+    private static let predicate = #"subsystem == "com.apple.coremedia" AND "#
+        + #"((process == "Music" AND eventMessage CONTAINS "fpfs_ReportAudioPlaybackThroughFigLog") "#
+        + #"OR eventMessage CONTAINS "Creating AudioQueue with format")"#
     private static let maxFailures = 5
 
     /// `log --style compact` starts every line with a local timestamp like `2026-11-22 00:55:24.168`.
@@ -76,10 +114,14 @@ final class LogWatcher: @unchecked Sendable {
 
     /// Called on the main queue. `live` is false for the format recovered from history at launch.
     private let onFormat: (_ format: TrackFormat, _ live: Bool) -> Void
+    private let onStream: (_ stream: StreamFormat, _ live: Bool) -> Void
     private let onFailure: (String) -> Void
 
-    init(onFormat: @escaping (TrackFormat, Bool) -> Void, onFailure: @escaping (String) -> Void) {
+    init(onFormat: @escaping (TrackFormat, Bool) -> Void,
+         onStream: @escaping (StreamFormat, Bool) -> Void,
+         onFailure: @escaping (String) -> Void) {
         self.onFormat = onFormat
+        self.onStream = onStream
         self.onFailure = onFailure
     }
 
@@ -87,11 +129,23 @@ final class LogWatcher: @unchecked Sendable {
 
     func start() {
         startStream()
-        // The track that was already playing before launch logged its format in the past.
+        // Whatever was already playing before launch logged its format in the past.
         DispatchQueue.global(qos: .utility).async { [self] in
-            guard let recent = Self.mostRecent(last: "15m") else { return }
-            noteStamp(recent.stamp)
-            DispatchQueue.main.async { self.onFormat(recent.format, false) }
+            let lines = Self.history(last: "1h")
+            // One entry per process: the newest.
+            var streams: [pid_t: StreamFormat] = [:]
+            for line in lines {
+                if let stream = StreamFormat.parse(line) { streams[stream.pid] = stream }
+            }
+            let recent = Self.mostRecent(in: lines).flatMap { found in
+                // A track that started more than a quarter of an hour ago is unlikely to be this one.
+                found.stamp.map { $0.timeIntervalSinceNow > -15 * 60 } ?? true ? found : nil
+            }
+            noteStamp(recent?.stamp)
+            DispatchQueue.main.async {
+                if let recent { self.onFormat(recent.format, false) }
+                for stream in streams.values { self.onStream(stream, false) }
+            }
         }
     }
 
@@ -120,7 +174,7 @@ final class LogWatcher: @unchecked Sendable {
     /// the stream is stuck: deliver the format and replace the stream.
     func resync() {
         DispatchQueue.global(qos: .utility).async { [self] in
-            guard let recent = Self.mostRecent(last: "2m") else { return }
+            guard let recent = Self.mostRecent(in: Self.history(last: "2m")) else { return }
             lock.lock()
             let seen = lastStamp
             lock.unlock()
@@ -134,18 +188,23 @@ final class LogWatcher: @unchecked Sendable {
 
     // MARK: History
 
-    private static func mostRecent(last window: String) -> (format: TrackFormat, stamp: Date?)? {
+    /// The matching log lines from the recent past, oldest first.
+    private static func history(last window: String) -> [String] {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/log")
         task.arguments = ["show", "--last", window, "--style", "compact", "--predicate", predicate]
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
-        guard (try? task.run()) != nil else { return nil }
+        guard (try? task.run()) != nil else { return [] }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         task.waitUntilExit()
-        for line in String(decoding: data, as: UTF8.self).split(separator: "\n").reversed() {
-            let line = String(line)
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
+    }
+
+    /// The newest Music track format among `lines`.
+    private static func mostRecent(in lines: [String]) -> (format: TrackFormat, stamp: Date?)? {
+        for line in lines.reversed() {
             if let format = TrackFormat.parse(line) { return (format, stamp(of: line)) }
         }
         return nil
@@ -222,12 +281,18 @@ final class LogWatcher: @unchecked Sendable {
     }
 
     private func handle(_ line: String) {
-        guard let format = TrackFormat.parse(line) else { return }
-        lock.lock()
-        failures = 0
-        lock.unlock()
-        noteStamp(Self.stamp(of: line))
-        DispatchQueue.main.async { self.onFormat(format, true) }
+        if let format = TrackFormat.parse(line) {
+            lock.lock()
+            failures = 0
+            lock.unlock()
+            noteStamp(Self.stamp(of: line))
+            DispatchQueue.main.async { self.onFormat(format, true) }
+        } else if let stream = StreamFormat.parse(line) {
+            lock.lock()
+            failures = 0
+            lock.unlock()
+            DispatchQueue.main.async { self.onStream(stream, true) }
+        }
     }
 
     private func streamEnded(generation mine: Int, stderr: String) {

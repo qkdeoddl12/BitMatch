@@ -22,6 +22,8 @@ final class AppState: ObservableObject {
     @Published private(set) var nowPlaying: [String: NowPlaying] = [:]
     /// The format of Apple Music's current track.
     @Published private(set) var trackFormat: TrackFormat?
+    /// What the followed app's own media engine last reported, when its rule is "auto".
+    @Published private(set) var activeStream: StreamFormat?
     /// The source whose rule picker is open in the popover.
     @Published var expandedSourceID: String?
 
@@ -72,6 +74,24 @@ final class AppState: ObservableObject {
     private var graceUntil: [String: Date] = [:]        // trust an announcement until the next check confirms it
     private var audibleSince: [String: Date] = [:]
     private var notApps: Set<String> = []               // bundle IDs already ruled out as sources
+    private var helperOwners: [pid_t: ProcessOwner.Answer] = [:]   // shared web helpers playing right now
+    /// The newest stream format each process reported, numbered in order of arrival.
+    private var streams: [pid_t: (format: StreamFormat, order: Int)] = [:]
+    private var streamsSeen = 0
+    /// The processes each source was last heard playing from.
+    private var sourcePIDs: [String: Set<pid_t>] = [:]
+
+    /// Who a shared web helper is playing for. Replaced by the self-test.
+    var ownerOfProcess: (pid_t) -> ProcessOwner.Answer = ProcessOwner.of
+    /// The display name of a running, regular app, or nil if the bundle ID is not one.
+    /// Replaced by the self-test.
+    var runningAppName: (String) -> String? = { bundle in
+        guard bundle != Bundle.main.bundleIdentifier,
+              let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first,
+              app.activationPolicy == .regular
+        else { return nil }
+        return app.localizedName ?? bundle
+    }
 
     private var lastLiveFormat = Date.distantPast
     private var lastResync = Date.distantPast
@@ -89,12 +109,20 @@ final class AppState: ObservableObject {
         let savedRules = defaults.dictionary(forKey: "sourceRules") as? [String: String] ?? [:]
         let savedNames = defaults.dictionary(forKey: "sourceNames") as? [String: String] ?? [:]
         rules = savedRules.compactMapValues(SourceRule.init(storage:))
-        // Apps the user gave a rule to stay listed even when they are not running.
-        let known = Set(Source.builtIn.map(\.id))
-        sources += rules
-            .filter { !known.contains($0.key) && $0.value != .ignore }
-            .map { Source(id: $0.key, kind: .other, name: savedNames[$0.key] ?? $0.key, defaultRule: .ignore) }
-            .sorted { $0.name < $1.name }
+        // Known players that are installed are listed from the start, and so are the apps the
+        // user gave a rule to, even when they are not running.
+        var extra = Source.installedKnownApps()
+        let listed = Set((Source.builtIn + extra).map(\.id))
+        extra += rules
+            .filter { !listed.contains($0.key) && $0.value != .ignore }
+            .map { id, _ in
+                var source = Source.known(forAppBundle: id)
+                    ?? Source(id: id, kind: .other, name: id, defaultRule: .ignore)
+                source.name = savedNames[id] ?? source.name
+                return source
+            }
+        sources += extra.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        appLog.notice("listed players: \(self.sources.map(\.id).joined(separator: ", "), privacy: .public)")
         start()
     }
 
@@ -115,6 +143,9 @@ final class AppState: ObservableObject {
         let watcher = LogWatcher(
             onFormat: { [weak self] format, live in
                 Task { @MainActor in self?.received(format, live: live) }
+            },
+            onStream: { [weak self] stream, live in
+                Task { @MainActor in self?.received(stream, live: live) }
             },
             onFailure: { [weak self] message in
                 Task { @MainActor in self?.problem = message }
@@ -192,6 +223,56 @@ final class AppState: ObservableObject {
         if !reevaluate(), activeSourceID == Source.music.id { applyActive() }
     }
 
+    /// An app's media engine announced the stream it is about to play.
+    func received(_ stream: StreamFormat, live: Bool) {
+        // History only fills in for processes that have not reported since launch.
+        if !live, streams[stream.pid] != nil { return }
+        streamsSeen += 1
+        streams[stream.pid] = (stream, streamsSeen)
+        if streams.count > 64 {
+            // Keep the newer half. Processes that matter report again with their next stream.
+            let cutoff = streams.values.map(\.order).sorted()[streams.count / 2]
+            streams = streams.filter { $0.value.order >= cutoff }
+        }
+        guard let source = activeSource, sourcePIDs[source.id]?.contains(stream.pid) == true else {
+            // Not the app being followed, at least not yet. Kept in case it starts playing.
+            appLog.info("""
+                stream format from pid \(stream.pid, privacy: .public): \
+                \(stream.codec, privacy: .public) \(Int(stream.sampleRate), privacy: .public) Hz
+                """)
+            return
+        }
+        appLog.notice("""
+            stream format (\(live ? "live" : "history", privacy: .public)) from \(source.id, privacy: .public): \
+            \(stream.codec, privacy: .public) \(Int(stream.sampleRate), privacy: .public) Hz
+            """)
+        refreshRequest()
+    }
+
+    /// The stream format a source's own processes last reported.
+    private func stream(for source: Source) -> StreamFormat? {
+        guard source.kind != .music, source.canReportFormat else { return nil }
+        return (sourcePIDs[source.id] ?? [])
+            .compactMap { streams[$0] }
+            .max { $0.order < $1.order }?
+            .format
+    }
+
+    /// Applies again if the active source now calls for something other than what was last asked.
+    private func refreshRequest() {
+        let wanted = wantedFormat()
+        if wanted?.rate != lastRequest?.rate || wanted?.depth != lastRequest?.depth {
+            applyActive()
+        } else {
+            noteActiveStream()
+        }
+    }
+
+    private func noteActiveStream() {
+        let current = activeSource.flatMap { rule(for: $0) == .auto ? stream(for: $0) : nil }
+        if current != activeStream { activeStream = current }
+    }
+
     /// Music says something is playing, so a format line should have just arrived or be about to.
     /// If none shows up, ask the watcher to check whether its log stream has gone quiet.
     private func expectFormatSoon() {
@@ -208,26 +289,52 @@ final class AppState: ObservableObject {
 
     func handleActivity(_ processes: [AudioDevice.OutputProcess]) {
         var playingNow = Set<String>()
+        var pidsNow: [String: Set<pid_t>] = [:]
+        func heard(_ id: String, from pid: pid_t) {
+            playingNow.insert(id)
+            pidsNow[id, default: []].insert(pid)
+        }
         var found = sources
+        let helperPIDs = Set(processes.filter { Source.isSharedWebHelper($0.bundleID) }.map(\.pid))
+        helperOwners = helperOwners.filter { helperPIDs.contains($0.key) }
         for process in processes {
-            if let id = Source.builtInID(forProcessBundle: process.bundleID) {
-                playingNow.insert(id)
+            var processBundle = process.bundleID
+            if Source.isSharedWebHelper(processBundle) {
+                // Safari's sound and a video inside a chat app come from the same kind of helper,
+                // so go by the app that owns this one.
+                switch helperOwner(of: process.pid) {
+                case .app(let owner):
+                    processBundle = owner
+                case .notAnApp:
+                    continue
+                case .unknown:
+                    // Can't tell, so assume the usual case: a browser.
+                    heard(Source.browser.id, from: process.pid)
+                    continue
+                }
+            }
+            if let id = Source.builtInID(forProcessBundle: processBundle) {
+                heard(id, from: process.pid)
                 continue
             }
-            let bundle = Source.appBundle(forProcessBundle: process.bundleID)
+            let known = Source.known(forAppBundle: Source.appBundle(forProcessBundle: processBundle))
+            let bundle = known?.id ?? Source.appBundle(forProcessBundle: processBundle)
             if found.contains(where: { $0.id == bundle }) {
-                playingNow.insert(bundle)
+                heard(bundle, from: process.pid)
             } else if !notApps.contains(bundle) {
                 // Only real apps count: no daemons, no agents, and not BitMatch itself.
-                let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first
-                if let app, app.activationPolicy == .regular, bundle != Bundle.main.bundleIdentifier {
-                    found.append(Source(id: bundle, kind: .other, name: app.localizedName ?? bundle, defaultRule: .ignore))
-                    playingNow.insert(bundle)
+                if let name = runningAppName(bundle) {
+                    var source = known ?? Source(id: bundle, kind: .other, name: name, defaultRule: .ignore)
+                    source.name = name
+                    found.append(source)
+                    heard(bundle, from: process.pid)
                 } else {
                     notApps.insert(bundle)
                 }
             }
         }
+        // A silent source keeps its last processes, so its stream format survives a pause.
+        for (id, pids) in pidsNow { sourcePIDs[id] = pids }
         // Forget apps that went quiet and were never given a rule.
         found.removeAll { source in
             source.kind == .other && !playingNow.contains(source.id)
@@ -237,7 +344,23 @@ final class AppState: ObservableObject {
         for source in sources {
             streak[source.id] = playingNow.contains(source.id) ? (streak[source.id] ?? 0) + 1 : 0
         }
-        reevaluate()
+        // The same app may have moved on to a stream with another format.
+        if !reevaluate() { refreshRequest() }
+    }
+
+    /// Looks up the owner once per helper, for as long as that helper keeps playing.
+    private func helperOwner(of pid: pid_t) -> ProcessOwner.Answer {
+        if let known = helperOwners[pid] { return known }
+        let answer = ownerOfProcess(pid)
+        helperOwners[pid] = answer
+        let owner: String
+        switch answer {
+        case .app(let bundle): owner = bundle
+        case .notAnApp: owner = "a background process"
+        case .unknown: owner = "an unknown owner"
+        }
+        appLog.notice("web audio from pid \(pid, privacy: .public) belongs to \(owner, privacy: .public)")
+        return answer
     }
 
     private func show(_ snapshot: AudioDevice.Snapshot?, settled: Bool) {
@@ -306,7 +429,9 @@ final class AppState: ObservableObject {
     var sourceRate: Double? {
         guard let source = activeSource else { return nil }
         switch rule(for: source) {
-        case .auto: return trackFormat?.sampleRate
+        case .auto:
+            if source.kind == .music { return trackFormat?.sampleRate }
+            return activeStream?.sampleRate ?? source.presetRate
         case .fixed(let rate): return rate
         case .ignore: return nil
         }
@@ -314,8 +439,14 @@ final class AppState: ObservableObject {
 
     /// The Apple Music track format, when Apple Music is the source being followed.
     private var followedTrack: TrackFormat? {
-        guard let source = activeSource, rule(for: source) == .auto else { return nil }
+        guard let source = activeSource, source.kind == .music, rule(for: source) == .auto else { return nil }
         return trackFormat
+    }
+
+    /// True while the followed app is on "auto" but has given BitMatch nothing to go on.
+    private var isWaitingForFormat: Bool {
+        guard let source = activeSource, source.kind != .music, rule(for: source) == .auto else { return false }
+        return activeStream == nil && source.presetRate == nil
     }
 
     var sourceLabel: String {
@@ -324,16 +455,20 @@ final class AppState: ObservableObject {
 
     var sourceDetail: String {
         guard sourceRate != nil else { return "—" }
-        guard let track = followedTrack else {
-            let preset = L("Preset", "지정 값")
-            return matchBitDepth ? "\(Self.presetBitDepth)-bit · \(preset)" : preset
+        if let track = followedTrack {
+            return track.isLossless ? "\(track.bitDepth)-bit · \(track.codecName)" : track.codecName
         }
-        return track.isLossless ? "\(track.bitDepth)-bit · \(track.codecName)" : track.codecName
+        if let stream = activeStream { return stream.codecName }
+        let preset = L("Preset", "지정 값")
+        return matchBitDepth ? "\(Self.presetBitDepth)-bit · \(preset)" : preset
     }
 
     var sourceCaption: String {
+        if isWaitingForFormat { return L("No format reported · pick a rate below", "형식 정보 없음 · 아래에서 값 선택") }
         guard sourceRate != nil else { return L("Waiting for playback", "재생 대기 중") }
-        return followedTrack?.qualityLabel ?? L("Set per app below", "아래에서 앱별 설정")
+        if let track = followedTrack { return track.qualityLabel }
+        if activeStream != nil { return L("Reported by the app", "앱이 알려 준 형식") }
+        return L("Set per app below", "아래에서 앱별 설정")
     }
 
     var activeNowPlaying: NowPlaying? {
@@ -396,8 +531,13 @@ final class AppState: ObservableObject {
         guard autoSwitch, let source = activeSource else { return nil }
         switch rule(for: source) {
         case .auto:
-            guard let track = trackFormat else { return nil }
-            return (track.sampleRate, matchBitDepth ? track.bitDepth : 0)
+            if source.kind == .music {
+                guard let track = trackFormat else { return nil }
+                return (track.sampleRate, matchBitDepth ? track.bitDepth : 0)
+            }
+            // Other apps report a sample rate at most, never a bit depth.
+            guard let rate = stream(for: source)?.sampleRate ?? source.presetRate else { return nil }
+            return (rate, matchBitDepth ? Self.presetBitDepth : 0)
         case .fixed(let preset):
             return (preset, matchBitDepth ? Self.presetBitDepth : 0)
         case .ignore:
@@ -407,12 +547,17 @@ final class AppState: ObservableObject {
 
     /// Puts the output device into the format the active source calls for.
     func applyActive() {
+        noteActiveStream()
         lastRequest = wantedFormat()
         guard live else { return }
         guard let request = lastRequest else {
             devices.refresh()
             return
         }
+        appLog.notice("""
+            asking for \(Int(request.rate), privacy: .public) Hz for \(self.activeSourceID ?? "?", privacy: .public)\
+            \(self.activeStream == nil ? "" : " (reported by the app)", privacy: .public)
+            """)
         isSwitching = true
         devices.match(sampleRate: request.rate, bitDepth: request.depth)
     }
@@ -441,7 +586,7 @@ final class AppState: ObservableObject {
 }
 
 extension AppState {
-    enum SampleScene { case appleMusic, spotify }
+    enum SampleScene { case appleMusic, spotify, otherPlayer }
 
     /// Fixed sample data for screenshots.
     static func sample(_ scene: SampleScene) -> AppState {
@@ -460,6 +605,15 @@ extension AppState {
             state.nowPlaying[Source.spotify.id] = NowPlaying(title: "Paper Lanterns", artist: "The Samplers", isPlaying: true)
             state.expandedSourceID = Source.spotify.id
             state.deviceRate = 44100
+            state.deviceBits = 24
+        case .otherPlayer:
+            // A player on "auto" whose media engine reported the stream it is playing.
+            let players = ["kr.co.bugs.macOS", "com.apple.TV"].compactMap(Source.known(forAppBundle:))
+            state.sources += players
+            state.activeSourceID = "com.apple.TV"
+            state.activeStream = StreamFormat(pid: 0, codec: "aac ", sampleRate: 48000)
+            state.expandedSourceID = "com.apple.TV"
+            state.deviceRate = 48000
             state.deviceBits = 24
         }
         return state

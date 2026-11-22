@@ -202,7 +202,7 @@ struct PopoverView: View {
                 .font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
                 .lineLimit(1)
             Spacer(minLength: 8)
-            Text(ruleLabel(state.rule(for: source), long: true))
+            Text(rowLabel(for: source))
                 .font(.system(size: 11.5))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
@@ -218,6 +218,15 @@ struct PopoverView: View {
         .accessibilityAddTraits(.isButton)
     }
 
+    /// What a source's row says about its rule. For apps other than Apple Music, "auto" names
+    /// the rate it falls back on when the app reports nothing.
+    private func rowLabel(for source: Source) -> String {
+        let rule = state.rule(for: source)
+        guard rule == .auto, source.kind != .music else { return ruleLabel(rule, long: true) }
+        let auto = L("Auto", "자동")
+        return source.presetRate.map { "\(auto) · \(formatRate($0))" } ?? auto
+    }
+
     private func ruleLabel(_ rule: SourceRule, long: Bool) -> String {
         switch rule {
         case .auto: return long ? L("Each track's own format", "곡마다 자동") : L("Auto", "자동")
@@ -226,11 +235,12 @@ struct PopoverView: View {
         }
     }
 
-    /// The rules a source can be given. Only Apple Music can report a per-track format.
+    /// The rules a source can be given. "Auto" is offered wherever the app is able to report
+    /// what it is playing, which Spotify never does.
     private func ruleChoices(for source: Source) -> [SourceRule] {
         if source.kind == .music { return [.auto, .ignore] }
         let rates = state.deviceRates.isEmpty ? [44100, 48000, 88200, 96000, 176400, 192000] : state.deviceRates
-        return [.ignore] + rates.map(SourceRule.fixed)
+        return (source.canReportFormat ? [.auto] : []) + [.ignore] + rates.map(SourceRule.fixed)
     }
 
     private func rulePicker(for source: Source) -> some View {

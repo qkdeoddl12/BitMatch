@@ -15,6 +15,11 @@ enum PreviewRenderer {
             let renderer = ImageRenderer(content: showcase)
             renderer.scale = 2
             image = renderer.cgImage
+        case "players":
+            // The popover while another player is being followed on "auto".
+            let renderer = ImageRenderer(content: panel(.dark, scene: .otherPlayer).padding(36).background(backdrop))
+            renderer.scale = 2
+            image = renderer.cgImage
         case "social":
             // GitHub's link preview card: 1280 x 640.
             let renderer = ImageRenderer(content: socialCard)
